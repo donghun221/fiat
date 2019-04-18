@@ -14,18 +14,13 @@
  * limitations under the License.
  */
 
-dependencies {
-  compile project(":fiat-roles")
+package com.netflix.spinnaker.fiat.roles.github.model;
 
-  compileOnly spinnaker.dependency("retrofit")
-  compileOnly spinnaker.dependency("okHttp")
-  compileOnly spinnaker.dependency("okHttpUrlconnection")
-  compileOnly spinnaker.dependency("okHttpApache")
-  compileOnly spinnaker.dependency("retrofitJackson")
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import lombok.Data;
 
-  compileOnly spinnaker.dependency("lombok")
-
-  compile "org.springframework.security:spring-security-ldap:${spinnaker.version('springSecurity')}"
-
-  spinnaker.group("spockBase")
+@Data
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class Member {
+    private String login;
 }

@@ -32,8 +32,28 @@ Fiat Service Accounts are groups that act as a user during automated triggers (s
 ---
 
 ### User Role/Authorization Providers
-There are currently two user role providers: Google Groups (through a Google Apps for Work organization) and GitHub Teams. If you would like to see additional providers, see [this issue](https://github.com/spinnaker/spinnaker/issues/2437).
+Currently supported user role providers are: 
+* Google Groups (through a Google Apps for Work organization) 
+* GitHub Teams
+* LDAP
+* File based role provider
 
 ---
 
-Roadmap/Implementation Punch list has been moved to [Milestone 1 Issues](https://github.com/spinnaker/fiat/milestone/1)
+### Modular builds
+By default, Fiat is built with all authorization providers included. To build only a subset of 
+providers, use the `includeProviders` flag:
+ ```
+./gradlew -PincludeProviders=google-groups,ldap clean build
+```
+ You can view the list of all providers in `gradle.properties`.
+
+### Debugging
+
+To start the JVM in debug mode, set the Java system property `DEBUG=true`:
+```
+./gradlew -DDEBUG=true
+```
+
+The JVM will then listen for a debugger to be attached on port 7103.  The JVM will _not_ wait for the debugger
+to be attached before starting Fiat; the relevant JVM arguments can be seen and modified as needed in `build.gradle`.

@@ -26,7 +26,7 @@ public class RedisConfig {
   @Bean
   @ConfigurationProperties("redis")
   public GenericObjectPoolConfig redisPoolConfig() {
-    GenericObjectPoolConfig config = new GenericObjectPoolConfig();
+    GenericObjectPoolConfig config = new JedisPoolConfig();
     config.setMaxTotal(20);
     config.setMaxIdle(20);
     config.setMinIdle(5);
@@ -69,41 +69,5 @@ public class RedisConfig {
     }
 
     return new JedisPool(redisPoolConfig, host, port, timeout, password, database, null);
-  }
-
-  @Bean
-  public HealthIndicator redisHealth(final JedisPool jedisPool) {
-    return new HealthIndicator() {
-      @Override
-      public Health health() {
-        Health.Builder health;
-        try (Jedis jedis = jedisPool.getResource()) {
-          if ("PONG".equals(jedis.ping())) {
-            health = Health.up();
-          } else {
-            health = Health.down();
-          }
-        } catch (Exception ex) {
-          health = Health.down(ex);
-        }
-
-        try {
-          Field f = FieldUtils.getField(JedisPool.class, "internalPool", true /*forceAccess*/);
-          Object o = FieldUtils.readField(f, jedisPool, true /*forceAccess*/);
-          if (o instanceof GenericObjectPool) {
-            GenericObjectPool internal = (GenericObjectPool) o;
-            health.withDetail("maxIdle", internal.getMaxIdle());
-            health.withDetail("minIdle", internal.getMinIdle());
-            health.withDetail("numActive", internal.getNumActive());
-            health.withDetail("numIdle", internal.getNumIdle());
-            health.withDetail("numWaiters", internal.getNumWaiters());
-          }
-        } catch (IllegalAccessException iae) {
-          log.debug("Can't access jedis' internal pool", iae);
-        }
-
-        return health.build();
-      }
-    };
   }
 }

@@ -56,6 +56,8 @@ import java.util.stream.Collectors;
 @Component
 @Slf4j
 public class FiatPermissionEvaluator implements PermissionEvaluator {
+  private final static ThreadLocal<AuthorizationFailure> authorizationFailure = new ThreadLocal<>();
+
   private final Registry registry;
   private final FiatService fiatService;
   private final FiatStatus fiatStatus;
@@ -65,7 +67,6 @@ public class FiatPermissionEvaluator implements PermissionEvaluator {
   private final Id getPermissionCounterId;
 
   private final RetryHandler retryHandler;
-
 
   interface RetryHandler {
     default <T> T retry(String description, Callable<T> callable) throws Exception {
@@ -149,8 +150,7 @@ public class FiatPermissionEvaluator implements PermissionEvaluator {
     return false;
   }
 
-  @Override
-  public boolean hasPermission(Authentication authentication,
+  public boolean hasPermission(String username,
                                Serializable resourceName,
                                String resourceType,
                                Object authorization) {
@@ -174,21 +174,22 @@ public class FiatPermissionEvaluator implements PermissionEvaluator {
       resourceName = resourceName.toString();
     }
 
-    UserPermission.View permission = getPermission(getUsername(authentication));
-    return permissionContains(permission, resourceName.toString(), r, a);
+    UserPermission.View permission = getPermission(username);
+    boolean hasPermission = permissionContains(permission, resourceName.toString(), r, a);
+
+    authorizationFailure.set(
+        hasPermission ? null : new AuthorizationFailure(a, r, resourceName.toString())
+    );
+
+    return hasPermission;
   }
 
-  private String getUsername(Authentication authentication) {
-    String username = "anonymous";
-    if (authentication.isAuthenticated() && authentication.getPrincipal() != null) {
-      Object principal = authentication.getPrincipal();
-      if (principal instanceof User) {
-        username = ((User) principal).getUsername();
-      } else if (StringUtils.isNotEmpty(principal.toString())) {
-        username = principal.toString();
-      }
-    }
-    return username;
+  @Override
+  public boolean hasPermission(Authentication authentication,
+                               Serializable resourceName,
+                               String resourceType,
+                               Object authorization) {
+    return hasPermission(getUsername(authentication), resourceName, resourceType, authorization);
   }
 
   public void invalidatePermission(String username) {
@@ -231,7 +232,7 @@ public class FiatPermissionEvaluator implements PermissionEvaluator {
                             .map(a -> new Account().setName(a))
                             .collect(Collectors.toSet())
                     )
-            ).setLegacyFallback(true);
+            ).setLegacyFallback(true).setAllowAccessToUnknownApplications(true);
           }
         }).call();
       });
@@ -254,10 +255,6 @@ public class FiatPermissionEvaluator implements PermissionEvaluator {
       id = id.withTag("legacyFallback", legacyFallback.get());
     }
 
-    if (legacyFallback.get()) {
-      permissionsCache.invalidate(username);
-    }
-
     registry.counter(id).increment();
 
     return view;
@@ -273,6 +270,23 @@ public class FiatPermissionEvaluator implements PermissionEvaluator {
     val authentication = SecurityContextHolder.getContext().getAuthentication();
     val permission = getPermission(getUsername(authentication));
     return permission != null;
+  }
+
+  public static Optional<AuthorizationFailure> getAuthorizationFailure() {
+    return Optional.ofNullable(authorizationFailure.get());
+  }
+
+  private String getUsername(Authentication authentication) {
+    String username = "anonymous";
+    if (authentication.isAuthenticated() && authentication.getPrincipal() != null) {
+      Object principal = authentication.getPrincipal();
+      if (principal instanceof User) {
+        username = ((User) principal).getUsername();
+      } else if (StringUtils.isNotEmpty(principal.toString())) {
+        username = principal.toString();
+      }
+    }
+    return username;
   }
 
   private boolean permissionContains(UserPermission.View permission,
@@ -317,6 +331,8 @@ public class FiatPermissionEvaluator implements PermissionEvaluator {
         return permission.getServiceAccounts()
             .stream()
             .anyMatch(view -> view.getName().equalsIgnoreCase(resourceName));
+      case BUILD_SERVICE:
+        return containsAuth.apply(permission.getBuildServices());
       default:
         return false;
     }
@@ -328,5 +344,38 @@ public class FiatPermissionEvaluator implements PermissionEvaluator {
   @SuppressWarnings("unused")
   public boolean isAdmin() {
     return true; // TODO(ttomsu): Chosen by fair dice roll. Guaranteed to be random.
+  }
+
+
+  public boolean isAdmin(Authentication authentication) {
+    if (!fiatStatus.isEnabled()) {
+      return true;
+    }
+    UserPermission.View permission = getPermission(getUsername(authentication));
+    return permission != null && permission.isAdmin();
+  }
+
+  public class AuthorizationFailure {
+    private final Authorization authorization;
+    private final ResourceType resourceType;
+    private final String resourceName;
+
+    public AuthorizationFailure(Authorization authorization, ResourceType resourceType, String resourceName) {
+      this.authorization = authorization;
+      this.resourceType = resourceType;
+      this.resourceName = resourceName;
+    }
+
+    public Authorization getAuthorization() {
+      return authorization;
+    }
+
+    public ResourceType getResourceType() {
+      return resourceType;
+    }
+
+    public String getResourceName() {
+      return resourceName;
+    }
   }
 }

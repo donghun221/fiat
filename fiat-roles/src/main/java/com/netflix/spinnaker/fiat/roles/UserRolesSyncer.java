@@ -16,9 +16,10 @@
 
 package com.netflix.spinnaker.fiat.roles;
 
-import com.diffplug.common.base.Functions;
 import com.netflix.appinfo.InstanceInfo;
 import com.netflix.discovery.DiscoveryClient;
+import com.netflix.spectator.api.Gauge;
+import com.netflix.spectator.api.Registry;
 import com.netflix.spinnaker.fiat.config.ResourceProvidersHealthIndicator;
 import com.netflix.spinnaker.fiat.config.UnrestrictedResourceConfig;
 import com.netflix.spinnaker.fiat.model.UserPermission;
@@ -32,6 +33,7 @@ import com.netflix.spinnaker.fiat.providers.ProviderException;
 import com.netflix.spinnaker.fiat.providers.ResourceProvider;
 import com.netflix.spinnaker.kork.eureka.RemoteStatusChangedEvent;
 import com.netflix.spinnaker.kork.lock.LockManager;
+import java.util.function.Function;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -44,6 +46,7 @@ import org.springframework.util.backoff.BackOffExecution;
 import org.springframework.util.backoff.FixedBackOff;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -70,8 +73,11 @@ public class UserRolesSyncer implements ApplicationListener<RemoteStatusChangedE
 
   private final AtomicBoolean isEnabled;
 
+  private final Gauge userRolesSyncCount;
+
   @Autowired
   public UserRolesSyncer(Optional<DiscoveryClient> discoveryClient,
+                         Registry registry,
                          LockManager lockManager,
                          PermissionsRepository permissionsRepository,
                          PermissionsResolver permissionsResolver,
@@ -98,6 +104,8 @@ public class UserRolesSyncer implements ApplicationListener<RemoteStatusChangedE
         // default to enabled iff discovery is not available
         !discoveryClient.isPresent()
     );
+
+    this.userRolesSyncCount = registry.gauge("fiat.userRoles.syncCount");
   }
 
   @Override
@@ -108,6 +116,7 @@ public class UserRolesSyncer implements ApplicationListener<RemoteStatusChangedE
   @Scheduled(fixedDelay = 30000L)
   public void schedule() {
     if (syncDelayMs < 0 || !isEnabled.get()) {
+      log.warn("User roles syncing is disabled (syncDelayMs: {}, isEnabled: {})", syncDelayMs, isEnabled.get());
       return;
     }
 
@@ -117,10 +126,17 @@ public class UserRolesSyncer implements ApplicationListener<RemoteStatusChangedE
         .withSuccessInterval(Duration.ofMillis(syncDelayMs))
         .withFailureInterval(Duration.ofMillis(syncFailureDelayMs));
 
-    lockManager.acquireLock(lockOptions, this::syncAndReturn);
+    lockManager.acquireLock(lockOptions, () -> {
+      try {
+        userRolesSyncCount.set(this.syncAndReturn(new ArrayList<>()));
+      } catch (Exception e) {
+        log.error("User roles synchronization failed", e);
+        userRolesSyncCount.set(-1);
+      }
+    });
   }
 
-  public long syncAndReturn() {
+  public long syncAndReturn(List<String> roles) {
     FixedBackOff backoff = new FixedBackOff();
     backoff.setInterval(retryIntervalMs);
     backoff.setMaxAttempts(Math.floorDiv(syncDelayTimeoutMs, retryIntervalMs) + 1);
@@ -140,10 +156,10 @@ public class UserRolesSyncer implements ApplicationListener<RemoteStatusChangedE
         //force a refresh of the unrestricted user in case the backing repository is empty:
         combo.put(UnrestrictedResourceConfig.UNRESTRICTED_USERNAME, new UserPermission());
         Map<String, UserPermission> temp;
-        if (!(temp = getUserPermissions()).isEmpty()) {
+        if (!(temp = getUserPermissions(roles)).isEmpty()) {
           combo.putAll(temp);
         }
-        if (!(temp = getServiceAccountsAsMap()).isEmpty()) {
+        if (!(temp = getServiceAccountsAsMap(roles)).isEmpty()) {
           combo.putAll(temp);
         }
 
@@ -183,16 +199,33 @@ public class UserRolesSyncer implements ApplicationListener<RemoteStatusChangedE
     return healthIndicator.health().getStatus() == Status.UP;
   }
 
-  private Map<String, UserPermission> getServiceAccountsAsMap() {
-    return serviceAccountProvider
+  private Map<String, UserPermission> getServiceAccountsAsMap(List<String> roles) {
+    List<UserPermission> allServiceAccounts = serviceAccountProvider
         .getAll()
         .stream()
         .map(ServiceAccount::toUserPermission)
-        .collect(Collectors.toMap(UserPermission::getId, Functions.identity()));
+        .collect(Collectors.toList());
+    if (roles == null || roles.isEmpty()) {
+      return allServiceAccounts
+              .stream()
+              .collect(Collectors.toMap(UserPermission::getId, Function.identity()));
+    } else {
+      return allServiceAccounts
+              .stream()
+              .filter(p -> p.getRoles()
+                      .stream()
+                      .map(Role::getName)
+                      .anyMatch(roles::contains))
+              .collect(Collectors.toMap(UserPermission::getId, Function.identity()));
+    }
   }
 
-  private Map<String, UserPermission> getUserPermissions() {
-    return permissionsRepository.getAllById();
+  private Map<String, UserPermission> getUserPermissions(List<String> roles) {
+    if (roles == null || roles.isEmpty()) {
+      return permissionsRepository.getAllById();
+    } else {
+      return permissionsRepository.getAllByRoles(roles);
+    }
   }
 
   public long updateUserPermissions(Map<String, UserPermission> permissionsById) {
